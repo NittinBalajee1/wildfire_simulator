@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: wildfire_simulator
+Version: 0.1.0
+Requires-Python: >=3.8
+Requires-Dist: tensorflow>=2.6.0
+Requires-Dist: numpy>=1.19.5
+Requires-Dist: rasterio>=1.2.10
+Requires-Dist: scikit-learn>=0.24.2
+Requires-Dist: scikit-image>=0.18.3
+Requires-Dist: matplotlib>=3.4.3
+Dynamic: requires-dist
+Dynamic: requires-python

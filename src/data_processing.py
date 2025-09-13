@@ -5,88 +5,89 @@ from skimage.transform import resize
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
-def load_raster(file_path):
-    """Load a single raster file and return as numpy array."""
-    with rasterio.open(file_path) as src:
-        return src.read(1)
+import os
+import tensorflow as tf
+import numpy as np
+from sklearn.model_selection import train_test_split
 
-def load_sample(sample_dir):
-    """Load all features for a single sample."""
-    features = ['elevation', 'wind_speed', 'temperature', 'humidity', 
-               'precipitation', 'vegetation_density', 'fuel_moisture', 'historical_burn_area']
+# ----------------------------
+# TFRecord Parsing
+# ----------------------------
+def parse_tfrecord(example_proto, input_shape=(128, 128, 3), mask_shape=(128, 128, 1)):
+    """
+    Parse a single TFRecord example into image and mask.
+    """
+    feature_description = {
+        "image": tf.io.FixedLenFeature([], tf.string),
+        "mask": tf.io.FixedLenFeature([], tf.string)
+    }
     
-    X = []
-    for feature in features:
-        file_path = os.path.join(sample_dir, f"{feature}.tif")
-        if os.path.exists(file_path):
-            arr = load_raster(file_path)
-            X.append(arr)
+    parsed = tf.io.parse_single_example(example_proto, feature_description)
     
-    # Load target mask
-    mask_path = os.path.join(sample_dir, 'fire_mask.tif')
-    y = load_raster(mask_path) if os.path.exists(mask_path) else None
+    image = tf.io.decode_raw(parsed['image'], tf.float32)
+    mask = tf.io.decode_raw(parsed['mask'], tf.float32)
     
-    return np.stack(X, axis=-1), y
+    image = tf.reshape(image, input_shape)
+    mask = tf.reshape(mask, mask_shape)
+    
+    return image, mask
 
-def preprocess_data(X, y, target_size=(256, 256)):
-    """Preprocess the data (resize and normalize)."""
-    # Resize
-    X_resized = np.array([resize(img, target_size, preserve_range=True) for img in X])
-    y_resized = resize(y, target_size, preserve_range=True, order=0, preserve_binary=True)
+# ----------------------------
+# Load and preprocess TFRecords
+# ----------------------------
+def load_and_preprocess_data(data_dir, input_shape=(128, 128, 3), mask_shape=(128, 128, 1), test_size=0.2):
+    """
+    Load all training TFRecords and split into training and validation sets.
+    """
+    # List all training TFRecords
+    tfrecord_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if "train" in f]
+    if len(tfrecord_files) == 0:
+        raise ValueError(f"No training TFRecords found in {data_dir}")
     
-    # Normalize features to [0, 1]
-    X_norm = (X_resized - X_resized.min(axis=(1, 2), keepdims=True)) / \
-             (X_resized.max(axis=(1, 2), keepdims=True) - X_resized.min(axis=(1, 2), keepdims=True) + 1e-8)
+    # Create TFRecord dataset
+    dataset = tf.data.TFRecordDataset(tfrecord_files)
+    dataset = dataset.map(lambda x: parse_tfrecord(x, input_shape, mask_shape))
     
-    # Ensure y is binary
-    y_binary = (y_resized > 0.5).astype(np.float32)
+    # Convert dataset to NumPy arrays
+    images, masks = [], []
+    for img, msk in dataset:
+        images.append(img.numpy())
+        masks.append(msk.numpy())
     
-    return X_norm, y_binary
+    X = np.array(images, dtype=np.float32)
+    y = np.array(masks, dtype=np.float32)
+    
+    # Split into training and validation
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=test_size, random_state=42)
+    
+    print(f"Loaded {len(X_train)} training samples and {len(X_val)} validation samples")
+    
+    return X_train, X_val, y_train, y_val
 
-def load_and_preprocess_data(data_dir):
-    """Load and preprocess all samples."""
-    samples = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
-    
-    X_list, y_list = [], []
-    for sample in samples:
-        sample_dir = os.path.join(data_dir, sample)
-        X, y = load_sample(sample_dir)
-        if y is not None:
-            X_list.append(X)
-            y_list.append(y)
-    
-    # Split into train and validation sets
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_list, y_list, test_size=0.2, random_state=42
-    )
-    
-    return np.array(X_train), np.array(X_val), np.array(y_train), np.array(y_val)
-
-def create_data_generator(X, y, batch_size=8, augment=True):
-    """Create a data generator with optional augmentation."""
-    if augment:
-        datagen = ImageDataGenerator(
-            rotation_range=20,
-            width_shift_range=0.2,
-            height_shift_range=0.2,
-            horizontal_flip=True,
-            fill_mode='nearest'
-        )
-    else:
-        datagen = ImageDataGenerator()
-    
-    # Add channel dimension if needed
-    if len(X.shape) == 3:
-        X = np.expand_dims(X, -1)
-    if len(y.shape) == 3:
-        y = np.expand_dims(y, -1)
-    
-    # Create generator
-    seed = 42
-    image_generator = datagen.flow(
-        X, y,
-        batch_size=batch_size,
-        seed=seed
-    )
-    
-    return image_generator
+# ----------------------------
+# Data Generator
+# ----------------------------
+def create_data_generator(X, y, batch_size=32, augment=False):
+    """
+    Simple data generator for training.
+    """
+    def generator():
+        while True:
+            indices = np.arange(len(X))
+            if augment:
+                np.random.shuffle(indices)
+            for start in range(0, len(X), batch_size):
+                end = start + batch_size
+                batch_idx = indices[start:end]
+                batch_X = X[batch_idx]
+                batch_y = y[batch_idx]
+                
+                # Optional augmentation
+                if augment:
+                    for i in range(len(batch_X)):
+                        if np.random.rand() > 0.5:
+                            batch_X[i] = np.flip(batch_X[i], axis=1)
+                            batch_y[i] = np.flip(batch_y[i], axis=1)
+                
+                yield batch_X, batch_y
+    return generator()
